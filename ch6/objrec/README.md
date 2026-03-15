@@ -4,6 +4,31 @@
 
 This simulation explores how a hierarchy of areas in the ventral stream of visual processing (up to inferotemporal (IT) cortex) can produce robust object recognition that is invariant to changes in position, size, etc of retinal input images.
 
+# Running Locally
+
+This version of `objrec` is part of the `copilot/edit-objrec-change-stimuli` branch of the [compcogneuro/sims](https://github.com/compcogneuro/sims) fork and extends the original stimulus set from 20 to 25 LED patterns.
+
+**Prerequisites:** [Go 1.23+](https://go.dev/dl/) and a C compiler (Xcode on macOS, GCC on Linux, TDM-GCC-64 on Windows).
+
+```bash
+# 1. Clone the repository and switch to this branch
+git clone https://github.com/compcogneuro/sims.git
+cd sims
+git checkout copilot/edit-objrec-change-stimuli
+
+# 2. Run the objrec simulation (opens the GUI)
+cd ch6/objrec
+go run .
+```
+
+To run headless (no GUI, useful for automated training on a server):
+
+```bash
+go run . -nogui
+```
+
+> **Note:** The pre-trained weights bundled with the original simulation are not compatible with the updated 25-pattern / 5×5 output layer.  Use the **Init** button followed by **Train** in the GUI to train the network from scratch, or click **Open Trained Wts** only after generating new weights.
+
 # Network Structure
 
 ![V1 Filters](fig_v1_visual_filters.png?raw=true "V1 Filters")
