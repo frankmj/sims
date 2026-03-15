@@ -432,6 +432,11 @@ func (ss *Sim) ApplyInputs() {
 
 	ss.Stats.SetString("TrialName", ev.TrialName.Cur)
 	for _, lnm := range lays {
+		// Skip the context layers: they are InputLayer type but are not part of the
+		// training table and are updated manually from the hidden layer below.
+		if lnm == "Context" || lnm == "Context2" {
+			continue
+		}
 		ly := ss.Net.LayerByName(lnm)
 		pats := ev.State(ly.Name)
 		if pats != nil {
