@@ -43,7 +43,7 @@ import (
 	"github.com/emer/leabra/v2/leabra"
 )
 
-//go:embed zeroth.tsv first.tsv custom.tsv
+//go:embed zeroth.tsv first.tsv third.tsv
 var content embed.FS
 
 // PatsType is the type of training patterns
@@ -56,12 +56,12 @@ const (
 	// first order sequence
 	First
 
-	// custom nth order sequence
-	Custom
+	// 3rd order sequence
+	Third
 )
 
 // LearnType is the type of learning to use
-type LearnType int32 //enums:enum
+//type LearnType int32 //enums:enum
 
 func main() {
 	sim := &Sim{}
@@ -116,13 +116,13 @@ var ParamSets = params.Sets{
 // Config has config parameters related to running the sim
 type Config struct {
 	// total number of runs to do when running Train
-	NRuns int `default:"1" min:"1"`
+	NRuns int `default:"10" min:"1"`
 
 	// total number of epochs per run
 	NEpochs int `default:"400"`
 
 	// stop run after this number of perfect, zero-error epochs.
-	NZero int `default:"20"`
+	NZero int `default:"5"`
 
 	// how often to run through all the test patterns, in terms of training epochs.
 	// can use 0 or -1 for no testing.
@@ -152,8 +152,8 @@ type Sim struct {
 	Zeroth *table.Table `new-window:"+" display:"no-inline"`
 	// first order training patterns
 	First *table.Table `new-window:"+" display:"no-inline"`
-	// custom n-th order training patterns
-	Custom *table.Table `new-window:"+" display:"no-inline"`
+	// 3rd order training patterns
+	Third *table.Table `new-window:"+" display:"no-inline"`
 
 	// contains looper control loops for running sim
 	Loops *looper.Stacks `new-window:"+" display:"no-inline"`
@@ -210,7 +210,7 @@ func (ss *Sim) New() {
 	ss.Stats.Init()
 	ss.Zeroth = &table.Table{}
 	ss.First = &table.Table{}
-	ss.Custom = &table.Table{}
+	ss.Third = &table.Table{}
 	ss.RandSeeds.Init(100) // max 100 runs
 	ss.InitRandSeed(0)
 	ss.Context.Defaults()
@@ -237,9 +237,9 @@ func (ss *Sim) OpenPatterns() {
 	ss.First.SetMetaData("desc", "first order training patterns")
 	errors.Log(ss.First.OpenFS(content, "first.tsv", table.Tab))
 
-	ss.Custom.SetMetaData("name", "Custom")
-	ss.Custom.SetMetaData("desc", "custom n-th order training patterns")
-	errors.Log(ss.Custom.OpenFS(content, "custom.tsv", table.Tab))
+	ss.Third.SetMetaData("name", "Third")
+	ss.Third.SetMetaData("desc", "third order training patterns")
+	errors.Log(ss.Third.OpenFS(content, "third.tsv", table.Tab))
 }
 
 func (ss *Sim) ConfigEnv() {
@@ -483,9 +483,9 @@ func (ss *Sim) UpdateEnv() {
 	case First:
 		trn.Table = table.NewIndexView(ss.First)
 		tst.Table = table.NewIndexView(ss.First)
-	case Custom:
-		trn.Table = table.NewIndexView(ss.Custom)
-		tst.Table = table.NewIndexView(ss.Custom)
+	case Third:
+		trn.Table = table.NewIndexView(ss.Third)
+		tst.Table = table.NewIndexView(ss.Third)
 	}
 }
 

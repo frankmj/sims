@@ -11,11 +11,11 @@ var _PatsTypeValues = []PatsType{0, 1, 2}
 // PatsTypeN is the highest valid value for type PatsType, plus one.
 const PatsTypeN PatsType = 3
 
-var _PatsTypeValueMap = map[string]PatsType{`Zeroth`: 0, `First`: 1, `Custom`: 2}
+var _PatsTypeValueMap = map[string]PatsType{`Zeroth`: 0, `First`: 1, `Third`: 2}
 
-var _PatsTypeDescMap = map[PatsType]string{0: `zeroth order sequence`, 1: `first order sequence`, 2: `custom n-th order sequence`}
+var _PatsTypeDescMap = map[PatsType]string{0: `zeroth order sequence`, 1: `first order sequence`, 2: `3rd order sequence`}
 
-var _PatsTypeMap = map[PatsType]string{0: `Zeroth`, 1: `First`, 2: `Custom`}
+var _PatsTypeMap = map[PatsType]string{0: `Zeroth`, 1: `First`, 2: `Third`}
 
 // String returns the string representation of this PatsType value.
 func (i PatsType) String() string { return enums.String(i, _PatsTypeMap) }
@@ -46,46 +46,3 @@ func (i PatsType) MarshalText() ([]byte, error) { return []byte(i.String()), nil
 
 // UnmarshalText implements the [encoding.TextUnmarshaler] interface.
 func (i *PatsType) UnmarshalText(text []byte) error { return enums.UnmarshalText(i, text, "PatsType") }
-
-var _LearnTypeValues = []LearnType{0, 1}
-
-// LearnTypeN is the highest valid value for type LearnType, plus one.
-const LearnTypeN LearnType = 2
-
-var _LearnTypeValueMap = map[string]LearnType{`Hebbian`: 0, `ErrorDriven`: 1}
-
-var _LearnTypeDescMap = map[LearnType]string{0: ``, 1: ``}
-
-var _LearnTypeMap = map[LearnType]string{0: `Hebbian`, 1: `ErrorDriven`}
-
-// String returns the string representation of this LearnType value.
-func (i LearnType) String() string { return enums.String(i, _LearnTypeMap) }
-
-// SetString sets the LearnType value from its string representation,
-// and returns an error if the string is invalid.
-func (i *LearnType) SetString(s string) error {
-	return enums.SetString(i, s, _LearnTypeValueMap, "LearnType")
-}
-
-// Int64 returns the LearnType value as an int64.
-func (i LearnType) Int64() int64 { return int64(i) }
-
-// SetInt64 sets the LearnType value from an int64.
-func (i *LearnType) SetInt64(in int64) { *i = LearnType(in) }
-
-// Desc returns the description of the LearnType value.
-func (i LearnType) Desc() string { return enums.Desc(i, _LearnTypeDescMap) }
-
-// LearnTypeValues returns all possible values for the type LearnType.
-func LearnTypeValues() []LearnType { return _LearnTypeValues }
-
-// Values returns all possible values for the type LearnType.
-func (i LearnType) Values() []enums.Enum { return enums.Values(_LearnTypeValues) }
-
-// MarshalText implements the [encoding.TextMarshaler] interface.
-func (i LearnType) MarshalText() ([]byte, error) { return []byte(i.String()), nil }
-
-// UnmarshalText implements the [encoding.TextUnmarshaler] interface.
-func (i *LearnType) UnmarshalText(text []byte) error {
-	return enums.UnmarshalText(i, text, "LearnType")
-}
