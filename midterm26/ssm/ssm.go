@@ -6,18 +6,23 @@
 // CLPS1492 Computational Cognitive Neuroscience -- Midterm
 // Please see the associated README.md file for a description of this project.
 //
-// This file implements a State Space Model (SSM) equivalent to the two-context-
-// layer SRN (srn_2ctx).  The key difference is that the two state layers are
-// COUPLED: the update of each state dimension depends on both its own previous
-// activity AND the previous activity of the other state dimension.  This gives
-// the model a full 2x2 state-transition (A) matrix:
+// This file implements a proper State Space Model (SSM):
 //
-//	State1(t) = FmHid  * Hidden(t-1) + FmPrv   * State1(t-1) + FmCross  * State2(t-1)
-//	State2(t) = FmHid2 * Hidden(t-1) + FmPrv2  * State2(t-1) + FmCross2 * State1(t-1)
+//	x(t) = A·x(t-1) + B·u(t)     state update
+//	y(t) = C·x(t)                 output (read-out via State→Hidden→Output)
 //
-// In the SRN / srn_2ctx the off-diagonal terms (FmCross, FmCross2) are fixed at
-// zero, meaning the two context layers evolve independently.  Setting non-zero
-// cross-coupling values here turns the model into a proper linear SSM.
+// where:
+//   - x is the State layer (n units, one layer — not two independent context layers)
+//   - A is an n×n state-transition matrix stored in Sim.A
+//   - B is a scalar FmHid applied element-wise from the Hidden layer (B matrix)
+//   - C is implemented by the learned State→Hidden Leabra path
+//
+// Three options control the A matrix at run time (all togglable in the GUI):
+//   - ADiagonal: only the diagonal of A is used (reduces to n independent leaky integrators)
+//   - AFixed:    A is frozen after initialisation (not updated during training)
+//   - AHiPPO:   initialise A with the HiPPO-LegS prior (Gu et al., 2020)
+//
+// When AFixed is false, A is updated each trial with a normalised Hebbian rule.
 
 package main
 
@@ -25,17 +30,15 @@ package main
 
 import (
 	"embed"
-	// Uncomment the below line to import "fmt" that supports printing in Go. This will prove useful for debugging.
-	//"fmt"
+	"math"
 
 	"cogentcore.org/core/base/errors"
-	"cogentcore.org/lab/base/randx"
 	"cogentcore.org/core/core"
 	"cogentcore.org/core/enums"
 	"cogentcore.org/core/icons"
 	"cogentcore.org/core/math32"
-	"github.com/emer/etensor/tensor/table"
 	"cogentcore.org/core/tree"
+	"cogentcore.org/lab/base/randx"
 	"github.com/emer/emergent/v2/econfig"
 	"github.com/emer/emergent/v2/egui"
 	"github.com/emer/emergent/v2/elog"
@@ -47,6 +50,7 @@ import (
 	"github.com/emer/emergent/v2/netview"
 	"github.com/emer/emergent/v2/params"
 	"github.com/emer/emergent/v2/paths"
+	"github.com/emer/etensor/tensor/table"
 	"github.com/emer/leabra/v2/leabra"
 )
 
@@ -183,36 +187,47 @@ type Sim struct {
 	// a list of random seeds to use for each run
 	RandSeeds randx.Seeds `display:"-"`
 
-	// FmHid is the proportion of State1's new activity taken from the hidden layer (B1 in SSM)
-	FmHid float32 `desc:"proportion of State1 activity taken from the hidden layer (B1)"`
+	// FmHid is the scalar B gain: how much of Hidden(t-1) drives the State update.
+	// Corresponds to the B matrix in x(t) = A·x(t-1) + B·u(t).
+	FmHid float32
 
-	// FmPrv is the proportion of State1's previous activity retained (A11 diagonal of SSM A matrix)
-	FmPrv float32 `desc:"proportion of State1 previous activity retained (A11)"`
+	// ADiagonal, if true, restricts the A matrix to its diagonal only.
+	// Each state unit then only receives its own previous activation (n independent leaky integrators).
+	// If false the full n×n A matrix is used, allowing cross-unit mixing.
+	ADiagonal bool
 
-	// FmHid2 is the proportion of State2's new activity taken from the hidden layer (B2 in SSM)
-	FmHid2 float32 `desc:"proportion of State2 activity taken from the hidden layer (B2)"`
+	// AFixed, if true, freezes the A matrix after initialisation.
+	// Combine with AHiPPO to use a fixed HiPPO prior throughout training.
+	AFixed bool
 
-	// FmPrv2 is the proportion of State2's previous activity retained (A22 diagonal of SSM A matrix)
-	FmPrv2 float32 `desc:"proportion of State2 previous activity retained (A22)"`
+	// AHiPPO, if true, initialises A with the HiPPO-LegS prior (Gu et al., 2020).
+	// The continuous-time generator is Euler-discretised with dt = 1/N.
+	// If false, A is initialised to a scaled identity (diagonal = 0.5).
+	AHiPPO bool
 
-	// FmCross is the cross-coupling from State2 into State1's update (A12 off-diagonal of SSM A matrix)
-	FmCross float32 `desc:"cross-coupling weight from State2 into State1 update (A12)"`
+	// ALrnRate is the learning rate used to update A each trial when AFixed is false.
+	// A normalised Hebbian rule is used: ΔA[i][j] = ALrnRate * (new[i]*prev[j] - A[i][j]*prev[j]²).
+	ALrnRate float32
 
-	// FmCross2 is the cross-coupling from State1 into State2's update (A21 off-diagonal of SSM A matrix)
-	FmCross2 float32 `desc:"cross-coupling weight from State1 into State2 update (A21)"`
+	// A is the n×n state-transition matrix, stored row-major (A[i*n+j]).
+	// It is initialised by InitA() and optionally updated by UpdateA().
+	A []float32 `display:"-"`
 
-	TmpVals1 []float32 `display:"-"`
-	TmpVals2 []float32 `display:"-"`
+	// APrev stores the State layer's plus-phase activations from the previous trial,
+	// i.e. x(t-1), used in both the state update and the A learning rule.
+	APrev []float32 `display:"-"`
+
+	// TmpHid is scratch storage for the Hidden layer's plus-phase activations.
+	TmpHid []float32 `display:"-"`
 }
 
 // New creates new blank elements and initializes defaults
 func (ss *Sim) New() {
-	ss.FmHid = 1
-	ss.FmPrv = 0
-	ss.FmHid2 = 1
-	ss.FmPrv2 = 0
-	ss.FmCross = 0
-	ss.FmCross2 = 0
+	ss.FmHid = 1.0
+	ss.ADiagonal = false
+	ss.AFixed = false
+	ss.AHiPPO = false
+	ss.ALrnRate = 0.01
 
 	econfig.Config(&ss.Config, "config.toml")
 	ss.Patterns = Zeroth
@@ -290,30 +305,26 @@ func (ss *Sim) ConfigNet(net *leabra.Network) {
 	hid := net.AddLayer2D("Hidden", 6, 5, leabra.SuperLayer)
 	out := net.AddLayer2D("Output", 1, 6, leabra.TargetLayer)
 
-	// State1 is the first SSM state dimension.  It receives from the hidden layer
-	// (B1 matrix) and from its own previous activity (A11) as well as from State2
-	// (A12 cross-coupling).  All updates are computed manually in ApplyInputs.
-	state1 := net.AddLayer2D("State1", 6, 5, leabra.InputLayer)
-
-	// State2 is the second SSM state dimension with independent B2/A22 parameters
-	// and cross-coupling A21 from State1.
-	state2 := net.AddLayer2D("State2", 6, 5, leabra.InputLayer)
+	// State is the single SSM state vector x(t).  It is an InputLayer whose
+	// activations are set manually in ApplyInputs() using the A matrix and
+	// the previous hidden-layer activity (B term).
+	state := net.AddLayer2D("State", 6, 5, leabra.InputLayer)
 
 	full := paths.NewFull()
 
 	net.ConnectLayers(inp, hid, full, leabra.ForwardPath)
 	net.BidirConnectLayers(hid, out, full)
-	net.ConnectLayers(state1, hid, full, leabra.ForwardPath)
-	net.ConnectLayers(state2, hid, full, leabra.ForwardPath)
+	// C matrix: State drives Hidden (read-out path)
+	net.ConnectLayers(state, hid, full, leabra.ForwardPath)
 
 	out.PlaceAbove(hid)
-	state1.PlaceRightOf(inp, 2)
-	state2.PlaceRightOf(state1, 2)
+	state.PlaceRightOf(inp, 2)
 
 	net.Build()
 	net.Defaults()
 	ss.ApplyParams()
 	net.InitWeights()
+	ss.InitA()
 }
 
 func (ss *Sim) ApplyParams() {
@@ -375,6 +386,10 @@ func (ss *Sim) ConfigLoops() {
 		stack.Loops[etime.Trial].OnStart.Add("ApplyInputs", func() {
 			ss.ApplyInputs()
 		})
+		// Update A matrix at the end of every trial (no-op when AFixed is true).
+		stack.Loops[etime.Trial].OnEnd.Add("UpdateA", func() {
+			ss.UpdateA()
+		})
 	}
 
 	ls.Loop(etime.Train, etime.Run).OnStart.Add("NewRun", ss.NewRun)
@@ -423,18 +438,100 @@ func (ss *Sim) ConfigLoops() {
 	ss.Loops = ls
 }
 
-// ApplyInputs applies input patterns from the environment and updates the SSM
-// state layers.  The state update implements the full SSM equations:
+// InitA initialises (or re-initialises) the A state-transition matrix.
+// Call this after ConfigNet, and whenever AHiPPO or ADiagonal changes at run time.
+func (ss *Sim) InitA() {
+	n := ss.Net.LayerByName("State").NumNeurons()
+	ss.A = make([]float32, n*n)
+	ss.APrev = make([]float32, n)
+	ss.TmpHid = make([]float32, n)
+
+	if ss.AHiPPO {
+		ss.initHiPPO(n)
+	} else {
+		// Default: scaled identity — each state unit retains half its previous value.
+		for i := 0; i < n; i++ {
+			ss.A[i*n+i] = 0.5
+		}
+	}
+}
+
+// initHiPPO sets A to the discretised HiPPO-LegS matrix (Gu et al., 2020).
 //
-//	State1(t) = FmHid  * Hidden(t-1) + FmPrv   * State1(t-1) + FmCross  * State2(t-1)
-//	State2(t) = FmHid2 * Hidden(t-1) + FmPrv2  * State2(t-1) + FmCross2 * State1(t-1)
+// The continuous-time generator is:
+//
+//	A_c[i][k] = −√((2i+1)(2k+1)) / N   for i > k   (lower triangular)
+//	A_c[i][i] = −(i+1) / N              for i = k   (diagonal; i is 0-based row index)
+//	A_c[i][k] = 0                        for i < k
+//
+// where N is the state dimension.  The forward-Euler discretisation
+// A_d = I + dt·A_c with dt = 1/N is used to obtain a stable transition matrix.
+func (ss *Sim) initHiPPO(N int) {
+	dt := float32(1.0) / float32(N)
+	for i := 0; i < N; i++ {
+		for j := 0; j < N; j++ {
+			var ac float32
+			if i > j {
+				ac = -float32(math.Sqrt(float64((2*i+1)*(2*j+1)))) / float32(N)
+			} else if i == j {
+				// diagonal: A_c[i][i] = -(i+1)/N  (i is the 0-based row index)
+				ac = -float32(i+1) / float32(N)
+			}
+			if i == j {
+				ss.A[i*N+j] = 1 + dt*ac // I + dt*A_c diagonal
+			} else {
+				ss.A[i*N+j] = dt * ac // dt*A_c off-diagonal
+			}
+		}
+	}
+}
+
+// UpdateA updates the A matrix using a normalised Hebbian (Oja-like) rule:
+//
+//	ΔA[i][j] = ALrnRate · (new_state[i]·prev_state[j] − A[i][j]·prev_state[j]²)
+//
+// This keeps the column norms of A bounded.
+// UpdateA is a no-op when AFixed is true.
+func (ss *Sim) UpdateA() {
+	if ss.AFixed {
+		return
+	}
+	stateLay := ss.Net.LayerByName("State")
+	var newState []float32
+	stateLay.UnitValues(&newState, "ActP", 0)
+
+	n := len(ss.APrev)
+	if n == 0 || len(ss.A) != n*n {
+		return // APrev not yet populated
+	}
+	lr := ss.ALrnRate
+
+	if ss.ADiagonal {
+		for i := 0; i < n; i++ {
+			p := ss.APrev[i]
+			ss.A[i*n+i] += lr * (newState[i]*p - ss.A[i*n+i]*p*p)
+		}
+	} else {
+		for i := 0; i < n; i++ {
+			for j := 0; j < n; j++ {
+				p := ss.APrev[j]
+				ss.A[i*n+j] += lr * (newState[i]*p - ss.A[i*n+j]*p*p)
+			}
+		}
+	}
+}
+
+// ApplyInputs applies input patterns from the environment and updates the SSM
+// State layer.  The state update implements the SSM equations:
+//
+//	x(t) = A·x(t-1) + FmHid·hidden(t-1)
+//
+// where A is the n×n matrix stored in Sim.A (optionally restricted to its
+// diagonal when ADiagonal is true), and FmHid is the scalar B gain.
 func (ss *Sim) ApplyInputs() {
 
 	ctx := &ss.Context
 	net := ss.Net
-	// net.InitActs() is commented out so that activations carry over between trials,
-	// which is required for the state layer mechanism to work correctly.
-	// net.InitActs()
 
 	ev := ss.Envs.ByMode(ctx.Mode).(*env.FixedTable)
 	ev.Step()
@@ -445,9 +542,8 @@ func (ss *Sim) ApplyInputs() {
 
 	ss.Stats.SetString("TrialName", ev.TrialName.Cur)
 	for _, lnm := range lays {
-		// Skip the SSM state layers: they are InputLayer type but are not part of the
-		// training table and are updated manually from the hidden layer below.
-		if lnm == "State1" || lnm == "State2" {
+		// Skip the State layer: it is InputLayer type but is set manually below.
+		if lnm == "State" {
 			continue
 		}
 		ly := ss.Net.LayerByName(lnm)
@@ -464,35 +560,47 @@ func (ss *Sim) ApplyInputs() {
 		out.Type = leabra.TargetLayer
 	}
 
-	// Collect hidden layer's previous plus-phase activity (Hidden(t-1)).
+	// Collect Hidden(t-1) plus-phase activations for the B term.
 	hid := net.LayerByName("Hidden")
-	hid.UnitValues(&ss.TmpVals1, "ActP", 0)
+	hid.UnitValues(&ss.TmpHid, "ActP", 0)
 
-	// Collect State1 and State2 previous plus-phase activity for cross-coupling.
-	s1Lay := net.LayerByName("State1")
-	s2Lay := net.LayerByName("State2")
-	s1Lay.UnitValues(&ss.TmpVals2, "ActP", 0) // State1(t-1)
+	// Collect State(t-1) plus-phase activations for the A term.
+	stateLay := net.LayerByName("State")
+	stateLay.UnitValues(&ss.APrev, "ActP", 0)
 
-	// Temporary storage for State2(t-1) before we overwrite State1.
-	s2Prev := make([]float32, len(s2Lay.Neurons))
-	s2Lay.UnitValues(&s2Prev, "ActP", 0) // State2(t-1)
+	n := len(ss.APrev)
+	// Guard: if A matrix not yet initialised (e.g. very first trial), initialise now.
+	if len(ss.A) != n*n {
+		ss.InitA()
+	}
+	newState := make([]float32, n)
 
-	// State1 SSM update: A11*State1(t-1) + A12*State2(t-1) + B1*Hidden(t-1)
-	clr1, set1, toTarg1 := s1Lay.ApplyExtFlags()
-	for i := range s1Lay.Neurons {
-		ext := ss.FmHid*ss.TmpVals1[i] +
-			ss.FmPrv*ss.TmpVals2[i] +
-			ss.FmCross*s2Prev[i]
-		s1Lay.ApplyExtValue(i, ext, clr1, set1, toTarg1)
+	// x(t) = A·x(t-1) + FmHid·hidden(t-1)
+	for i := 0; i < n; i++ {
+		var aterm float32
+		if ss.ADiagonal {
+			// Only the diagonal: x[i](t) = A[i][i]*x[i](t-1)
+			aterm = ss.A[i*n+i] * ss.APrev[i]
+		} else {
+			// Full A matrix: x[i](t) = sum_j A[i][j]*x[j](t-1)
+			for j := 0; j < n; j++ {
+				aterm += ss.A[i*n+j] * ss.APrev[j]
+			}
+		}
+		v := aterm + ss.FmHid*ss.TmpHid[i]
+		// Clamp to [0,1] so the InputLayer activation stays in a sensible range.
+		if v < 0 {
+			v = 0
+		} else if v > 1 {
+			v = 1
+		}
+		newState[i] = v
 	}
 
-	// State2 SSM update: A22*State2(t-1) + A21*State1(t-1) + B2*Hidden(t-1)
-	clr2, set2, toTarg2 := s2Lay.ApplyExtFlags()
-	for i := range s2Lay.Neurons {
-		ext := ss.FmHid2*ss.TmpVals1[i] +
-			ss.FmPrv2*s2Prev[i] +
-			ss.FmCross2*ss.TmpVals2[i]
-		s2Lay.ApplyExtValue(i, ext, clr2, set2, toTarg2)
+	// Drive the State layer with the computed activations.
+	clr, set, toTarg := stateLay.ApplyExtFlags()
+	for i := range stateLay.Neurons {
+		stateLay.ApplyExtValue(i, newState[i], clr, set, toTarg)
 	}
 }
 
@@ -523,6 +631,7 @@ func (ss *Sim) NewRun() {
 	ctx.Reset()
 	ctx.Mode = etime.Train
 	ss.Net.InitWeights()
+	ss.InitA() // re-initialise A matrix for this run
 	ss.InitStats()
 	ss.StatCounters()
 	ss.Logs.ResetLog(etime.Train, etime.Epoch)
@@ -654,7 +763,7 @@ func (ss *Sim) Log(mode etime.Modes, time etime.Times) {
 // ConfigGUI configures the Cogent Core GUI interface for this simulation.
 func (ss *Sim) ConfigGUI() {
 	title := "State Space Model (SSM)"
-	ss.GUI.MakeBody(ss, "SSM", title, `SSM midterm -- state space model with two coupled state dimensions`)
+	ss.GUI.MakeBody(ss, "SSM", title, `SSM midterm -- proper state space model with a single n×n A matrix`)
 	ss.GUI.CycleUpdateInterval = 10
 
 	nv := ss.GUI.AddNetView("Network")
@@ -683,6 +792,19 @@ func (ss *Sim) MakeToolbar(p *tree.Plan) {
 		Active:  egui.ActiveStopped,
 		Func: func() {
 			ss.Loops.ResetCountersByMode(etime.Test)
+		},
+	})
+
+	////////////////////////////////////////////////
+	tree.Add(p, func(w *core.Separator) {})
+	ss.GUI.AddToolbarItem(p, egui.ToolbarItem{
+		Label:   "Re-init A",
+		Icon:    icons.Reset,
+		Tooltip: "Re-initialise the A state-transition matrix using the current ADiagonal / AHiPPO settings. Useful after changing those flags mid-run.",
+		Active:  egui.ActiveStopped,
+		Func: func() {
+			ss.InitA()
+			ss.ViewUpdate.Update()
 		},
 	})
 
