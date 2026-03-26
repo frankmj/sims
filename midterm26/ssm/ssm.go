@@ -206,7 +206,10 @@ type Sim struct {
 	AHiPPO bool
 
 	// ALrnRate is the learning rate used to update A each trial when AFixed is false.
-	// A normalised Hebbian rule is used: ΔA[i][j] = ALrnRate * (new[i]*prev[j] - A[i][j]*prev[j]²).
+	// Standard Oja rule: ΔA[i][j] = ALrnRate * (y[i]*prev[j] - y[i]²*A[i][j])
+	// where y[i] is the pre-clamp linear SSM output.  Using y[i]² (not prev[j]²)
+	// ensures weight decay is proportional to output magnitude, preventing runaway
+	// growth when the row sum of A drives the linear output above 1.
 	ALrnRate float32
 
 	// A is the n×n state-transition matrix, stored row-major (A[i*n+j]).
@@ -219,6 +222,11 @@ type Sim struct {
 
 	// TmpHid is scratch storage for the Hidden layer's plus-phase activations.
 	TmpHid []float32 `display:"-"`
+
+	// LinearState stores the pre-clamp linear SSM output x̃(t) = A·x(t-1) + B·u(t)
+	// before it is clamped to [0,1].  Used by UpdateA so the Oja normalisation
+	// term sees the true magnitude of the dynamics rather than the saturated value.
+	LinearState []float32 `display:"-"`
 }
 
 // New creates new blank elements and initializes defaults
@@ -445,6 +453,7 @@ func (ss *Sim) InitA() {
 	ss.A = make([]float32, n*n)
 	ss.APrev = make([]float32, n)
 	ss.TmpHid = make([]float32, n)
+	ss.LinearState = make([]float32, n)
 
 	if ss.AHiPPO {
 		ss.initHiPPO(n)
@@ -486,23 +495,23 @@ func (ss *Sim) initHiPPO(N int) {
 	}
 }
 
-// UpdateA updates the A matrix using a normalised Hebbian (Oja-like) rule:
+// UpdateA updates the A matrix using the standard Oja rule:
 //
-//	ΔA[i][j] = ALrnRate · (new_state[i]·prev_state[j] − A[i][j]·prev_state[j]²)
+//	ΔA[i][j] = ALrnRate · (y[i]·prev_state[j] − y[i]²·A[i][j])
 //
-// This keeps the column norms of A bounded.
+// where y[i] is the pre-clamp linear SSM output stored in LinearState.
+// Using y[i]² (not prev[j]²) ensures that when the linear output is large
+// (> 1), the decay term dominates and pulls weights down, preventing the
+// runaway growth that occurs when the clamped ActP is used instead.
 // UpdateA is a no-op when AFixed is true.
 func (ss *Sim) UpdateA() {
 	if ss.AFixed {
 		return
 	}
-	stateLay := ss.Net.LayerByName("State")
-	var newState []float32
-	stateLay.UnitValues(&newState, "ActP", 0)
 
 	n := len(ss.APrev)
-	if n == 0 || len(ss.A) != n*n {
-		return // APrev not yet populated
+	if n == 0 || len(ss.A) != n*n || len(ss.LinearState) != n {
+		return // not yet populated
 	}
 	lr := ss.ALrnRate
 
@@ -510,14 +519,16 @@ func (ss *Sim) UpdateA() {
 	useDiag := ss.ADiagonal && !ss.AHiPPO
 	if useDiag {
 		for i := 0; i < n; i++ {
+			y := ss.LinearState[i]
 			p := ss.APrev[i]
-			ss.A[i*n+i] += lr * (newState[i]*p - ss.A[i*n+i]*p*p)
+			ss.A[i*n+i] += lr * (y*p - y*y*ss.A[i*n+i])
 		}
 	} else {
 		for i := 0; i < n; i++ {
+			y := ss.LinearState[i]
 			for j := 0; j < n; j++ {
 				p := ss.APrev[j]
-				ss.A[i*n+j] += lr * (newState[i]*p - ss.A[i*n+j]*p*p)
+				ss.A[i*n+j] += lr * (y*p - y*y*ss.A[i*n+j])
 			}
 		}
 	}
@@ -592,6 +603,8 @@ func (ss *Sim) ApplyInputs() {
 			}
 		}
 		v := aterm + ss.FmHid*ss.TmpHid[i]
+		// Save the pre-clamp linear output for the Oja learning rule.
+		ss.LinearState[i] = v
 		// Clamp to [0,1] so the InputLayer activation stays in a sensible range.
 		if v < 0 {
 			v = 0
