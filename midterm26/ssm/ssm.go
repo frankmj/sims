@@ -441,7 +441,7 @@ func (ss *Sim) ConfigLoops() {
 // InitA initialises (or re-initialises) the A state-transition matrix.
 // Call this after ConfigNet, and whenever AHiPPO or ADiagonal changes at run time.
 func (ss *Sim) InitA() {
-	n := ss.Net.LayerByName("State").NumNeurons()
+	n := len(ss.Net.LayerByName("State").Neurons)
 	ss.A = make([]float32, n*n)
 	ss.APrev = make([]float32, n)
 	ss.TmpHid = make([]float32, n)
