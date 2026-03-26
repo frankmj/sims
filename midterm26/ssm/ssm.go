@@ -506,7 +506,9 @@ func (ss *Sim) UpdateA() {
 	}
 	lr := ss.ALrnRate
 
-	if ss.ADiagonal {
+	// HiPPO requires the full matrix; ADiagonal only applies to the non-HiPPO case.
+	useDiag := ss.ADiagonal && !ss.AHiPPO
+	if useDiag {
 		for i := 0; i < n; i++ {
 			p := ss.APrev[i]
 			ss.A[i*n+i] += lr * (newState[i]*p - ss.A[i*n+i]*p*p)
@@ -576,9 +578,11 @@ func (ss *Sim) ApplyInputs() {
 	newState := make([]float32, n)
 
 	// x(t) = A·x(t-1) + FmHid·hidden(t-1)
+	// HiPPO always requires the full matrix: ADiagonal is ignored when AHiPPO is true.
+	useDiag := ss.ADiagonal && !ss.AHiPPO
 	for i := 0; i < n; i++ {
 		var aterm float32
-		if ss.ADiagonal {
+		if useDiag {
 			// Only the diagonal: x[i](t) = A[i][i]*x[i](t-1)
 			aterm = ss.A[i*n+i] * ss.APrev[i]
 		} else {
