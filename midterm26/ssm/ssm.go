@@ -18,11 +18,14 @@
 //   - C is implemented by the learned State→Hidden Leabra path
 //
 // Three options control the A matrix at run time (all togglable in the GUI):
-//   - ADiagonal: only the diagonal of A is used (reduces to n independent leaky integrators)
+//   - ADiagonal: only the diagonal of A is used (reduces to n independent leaky integrators).
+//     When combined with AHiPPO, the HiPPO diagonal pattern is extracted and rescaled to
+//     [0.1, 0.9] so the progressively-decreasing structure is preserved.
 //   - AFixed:    A is frozen after initialisation (not updated during training)
 //   - AHiPPO:   initialise A with the HiPPO-LegS prior (Gu et al., 2020)
 //
-// When AFixed is false, A is updated each trial with a normalised Hebbian rule.
+// When AFixed is false, A is updated each trial with the XCAL learning rule (BCM Hebbian),
+// the same rule used for the standard Leabra weight updates in the rest of the network.
 
 package main
 
@@ -206,11 +209,21 @@ type Sim struct {
 	AHiPPO bool
 
 	// ALrnRate is the learning rate used to update A each trial when AFixed is false.
-	// Standard Oja rule: ΔA[i][j] = ALrnRate * (y[i]*prev[j] - y[i]²*A[i][j])
-	// where y[i] is the pre-clamp linear SSM output.  Using y[i]² (not prev[j]²)
-	// ensures weight decay is proportional to output magnitude, preventing runaway
-	// growth when the row sum of A drives the linear output above 1.
+	// XCAL rule: ΔA[i][j] = ALrnRate * XCAL(LinearState[i]*APrev[j], AAvgL[i])
+	// where LinearState[i] is the pre-clamp linear SSM output and AAvgL[i] is the BCM threshold.
 	ALrnRate float32
+
+	// AAvgLTau is the time constant for the long-term running average AAvgL (default 10).
+	// Matches the Leabra AvgL.Tau parameter.
+	AAvgLTau float32
+
+	// AAvgLGain is the gain multiplier applied to LinearState when updating AAvgL (default 2.5).
+	// Matches the Leabra AvgL.Gain parameter.
+	AAvgLGain float32
+
+	// AAvgLMin is the minimum value of AAvgL (default 0.2).
+	// Matches the Leabra AvgL.Min parameter.
+	AAvgLMin float32
 
 	// A is the n×n state-transition matrix, stored row-major (A[i*n+j]).
 	// It is initialised by InitA() and optionally updated by UpdateA().
@@ -224,9 +237,13 @@ type Sim struct {
 	TmpHid []float32 `display:"-"`
 
 	// LinearState stores the pre-clamp linear SSM output x̃(t) = A·x(t-1) + B·u(t)
-	// before it is clamped to [0,1].  Used by UpdateA so the Oja normalisation
-	// term sees the true magnitude of the dynamics rather than the saturated value.
+	// before it is clamped to [0,1].  Used by UpdateA for the XCAL learning rule.
 	LinearState []float32 `display:"-"`
+
+	// AAvgL is the long-term running average of LinearState, used as the BCM threshold
+	// in the XCAL weight update rule (one value per state unit).
+	// Updated each trial: AAvgL[i] += (1/AAvgLTau) * (AAvgLGain*LinearState[i] - AAvgL[i]).
+	AAvgL []float32 `display:"-"`
 }
 
 // New creates new blank elements and initializes defaults
@@ -236,6 +253,9 @@ func (ss *Sim) New() {
 	ss.AFixed = false
 	ss.AHiPPO = false
 	ss.ALrnRate = 0.01
+	ss.AAvgLTau = 10
+	ss.AAvgLGain = 2.5
+	ss.AAvgLMin = 0.2
 
 	econfig.Config(&ss.Config, "config.toml")
 	ss.Patterns = Zeroth
@@ -454,9 +474,19 @@ func (ss *Sim) InitA() {
 	ss.APrev = make([]float32, n)
 	ss.TmpHid = make([]float32, n)
 	ss.LinearState = make([]float32, n)
+	ss.AAvgL = make([]float32, n)
+	for i := range ss.AAvgL {
+		ss.AAvgL[i] = ss.AAvgLMin // initialise at minimum threshold
+	}
 
 	if ss.AHiPPO {
-		ss.initHiPPO(n)
+		if ss.ADiagonal {
+			// Diagonal-only mode with HiPPO: extract the HiPPO diagonal pattern
+			// and rescale it to a useful range so the structure is preserved.
+			ss.initHiPPODiagonal(n)
+		} else {
+			ss.initHiPPO(n)
+		}
 	} else {
 		// Default: scaled identity — each state unit retains half its previous value.
 		for i := 0; i < n; i++ {
@@ -495,14 +525,60 @@ func (ss *Sim) initHiPPO(N int) {
 	}
 }
 
-// UpdateA updates the A matrix using the standard Oja rule:
+// initHiPPODiagonal initialises only the diagonal of A with the HiPPO-LegS pattern
+// (Gu et al., 2020), rescaled so the progressively-decreasing structure spans a
+// useful weight range [0.1, 0.9] instead of the narrow raw range (e.g., [0.90, 0.99]
+// for N=10).  The 0-th unit gets the largest weight (most recent memory) and the
+// (N-1)-th unit gets the smallest (most remote memory).
+func (ss *Sim) initHiPPODiagonal(N int) {
+	// Raw HiPPO diagonal after forward-Euler: A_d[i][i] = 1 - (i+1)/N²
+	// This decreases from v[0] = 1 - 1/N² (largest) to v[N-1] = 1 - 1/N (smallest).
+	vMax := float32(1) - float32(1)/float32(N*N)
+	vMin := float32(1) - float32(1)/float32(N)
+	span := vMax - vMin
+	const lo, hi = float32(0.1), float32(0.9)
+	for i := 0; i < N; i++ {
+		v := float32(1) - float32(i+1)/float32(N*N)
+		if span > 1e-6 {
+			ss.A[i*N+i] = lo + (v-vMin)/span*(hi-lo)
+		} else {
+			ss.A[i*N+i] = (lo + hi) / 2
+		}
+	}
+}
+
+// xcalDWt implements the XCAL "check mark" weight change function used throughout
+// the Leabra network.  srval is the sender×receiver co-product; thrP is the BCM
+// threshold (AAvgL for the A-matrix learning rule).
+// Matches XCalParams.DWt with default parameters DRev=0.1, DThr=0.0001.
+func xcalDWt(srval, thrP float32) float32 {
+	const (
+		dRev      = 0.1
+		dThr      = 0.0001
+		dRevRatio = -(1 - dRev) / dRev // = -9.0
+	)
+	if srval < dThr {
+		return 0
+	} else if srval > thrP*dRev {
+		return srval - thrP
+	}
+	return srval * dRevRatio
+}
+
+// UpdateA updates the A matrix using the XCAL learning rule (BCM Hebbian),
+// the same rule used for standard Leabra weight updates in the rest of the network:
 //
-//	ΔA[i][j] = ALrnRate · (y[i]·prev_state[j] − y[i]²·A[i][j])
+//	ΔA[i][j] = ALrnRate · XCAL(y[i]·prev_state[j], AAvgL[i])
 //
-// where y[i] is the pre-clamp linear SSM output stored in LinearState.
-// Using y[i]² (not prev[j]²) ensures that when the linear output is large
-// (> 1), the decay term dominates and pulls weights down, preventing the
-// runaway growth that occurs when the clamped ActP is used instead.
+// where y[i] is the pre-clamp linear SSM output (LinearState[i]) and AAvgL[i]
+// is the BCM floating threshold — a gain-scaled exponential moving average of y[i].
+// AAvgL is updated each trial before the weight change:
+//
+//	AAvgL[i] += (1/AAvgLTau) · (AAvgLGain·y[i] − AAvgL[i])
+//
+// The XCAL function naturally prevents weight saturation: when the BCM threshold
+// rises (because a unit is consistently highly active) it suppresses further LTP
+// and promotes LTD, keeping weights in a healthy range.
 // UpdateA is a no-op when AFixed is true.
 func (ss *Sim) UpdateA() {
 	if ss.AFixed {
@@ -513,22 +589,36 @@ func (ss *Sim) UpdateA() {
 	if n == 0 || len(ss.A) != n*n || len(ss.LinearState) != n {
 		return // not yet populated
 	}
-	lr := ss.ALrnRate
 
-	// HiPPO requires the full matrix; ADiagonal only applies to the non-HiPPO case.
-	useDiag := ss.ADiagonal && !ss.AHiPPO
+	// Ensure AAvgL is initialised (guard against first-trial edge case).
+	if len(ss.AAvgL) != n {
+		ss.AAvgL = make([]float32, n)
+		for i := range ss.AAvgL {
+			ss.AAvgL[i] = ss.AAvgLMin
+		}
+	}
+
+	// Update long-term running average (BCM threshold), matching Leabra AvgL update.
+	dt := float32(1.0) / ss.AAvgLTau
+	for i := 0; i < n; i++ {
+		ss.AAvgL[i] += dt * (ss.AAvgLGain*ss.LinearState[i] - ss.AAvgL[i])
+		if ss.AAvgL[i] < ss.AAvgLMin {
+			ss.AAvgL[i] = ss.AAvgLMin
+		}
+	}
+
+	lr := ss.ALrnRate
+	useDiag := ss.ADiagonal
 	if useDiag {
 		for i := 0; i < n; i++ {
-			y := ss.LinearState[i]
-			p := ss.APrev[i]
-			ss.A[i*n+i] += lr * (y*p - y*y*ss.A[i*n+i])
+			srval := ss.LinearState[i] * ss.APrev[i]
+			ss.A[i*n+i] += lr * xcalDWt(srval, ss.AAvgL[i])
 		}
 	} else {
 		for i := 0; i < n; i++ {
-			y := ss.LinearState[i]
 			for j := 0; j < n; j++ {
-				p := ss.APrev[j]
-				ss.A[i*n+j] += lr * (y*p - y*y*ss.A[i*n+j])
+				srval := ss.LinearState[i] * ss.APrev[j]
+				ss.A[i*n+j] += lr * xcalDWt(srval, ss.AAvgL[i])
 			}
 		}
 	}
@@ -589,8 +679,9 @@ func (ss *Sim) ApplyInputs() {
 	newState := make([]float32, n)
 
 	// x(t) = A·x(t-1) + FmHid·hidden(t-1)
-	// HiPPO always requires the full matrix: ADiagonal is ignored when AHiPPO is true.
-	useDiag := ss.ADiagonal && !ss.AHiPPO
+	// When ADiagonal is true, only the diagonal of A is used regardless of AHiPPO
+	// (the HiPPO diagonal structure is preserved in InitA via initHiPPODiagonal).
+	useDiag := ss.ADiagonal
 	for i := 0; i < n; i++ {
 		var aterm float32
 		if useDiag {
@@ -603,7 +694,7 @@ func (ss *Sim) ApplyInputs() {
 			}
 		}
 		v := aterm + ss.FmHid*ss.TmpHid[i]
-		// Save the pre-clamp linear output for the Oja learning rule.
+		// Save the pre-clamp linear output for the XCAL learning rule.
 		ss.LinearState[i] = v
 		// Clamp to [0,1] so the InputLayer activation stays in a sensible range.
 		if v < 0 {
