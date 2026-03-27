@@ -27,6 +27,7 @@ import (
 	"cogentcore.org/core/enums"
 	"cogentcore.org/core/icons"
 	"cogentcore.org/core/math32"
+	"github.com/emer/etensor/tensor/stats/clust"
 	"github.com/emer/etensor/tensor/table"
 	"cogentcore.org/core/tree"
 	"github.com/emer/emergent/v2/econfig"
@@ -626,6 +627,22 @@ func (ss *Sim) Log(mode etime.Modes, time etime.Times) {
 }
 
 //////////////////////////////////////////////////////////////////////
+// 		Reps Analysis
+
+// RepsAnalysis analyzes the representations in the Hidden layer as
+// captured in the Test Trial log, and produces a cluster plot.
+func (ss *Sim) RepsAnalysis() {
+	trl := ss.Logs.Table(etime.Test, etime.Trial)
+	if trl == nil {
+		return
+	}
+	ix := table.NewIndexView(trl)
+	ix.SortColumnName("TrialName", table.Ascending)
+	estats.ClusterPlot(ss.GUI.PlotByName("HiddenClust"), ix, "Hidden_ActM", "TrialName", clust.ContrastDist)
+	ss.GUI.PlotByName("HiddenClust").GoUpdatePlot()
+}
+
+//////////////////////////////////////////////////////////////////////
 // 		GUI
 
 // ConfigGUI configures the Cogent Core GUI interface for this simulation.
@@ -649,6 +666,8 @@ func (ss *Sim) ConfigGUI() {
 
 	ss.GUI.AddTableView(&ss.Logs, etime.Test, etime.Trial)
 
+	ss.GUI.AddMiscPlotTab("HiddenClust")
+
 	ss.GUI.FinalizeGUI(false)
 }
 
@@ -660,6 +679,17 @@ func (ss *Sim) MakeToolbar(p *tree.Plan) {
 		Active:  egui.ActiveStopped,
 		Func: func() {
 			ss.Loops.ResetCountersByMode(etime.Test)
+		},
+	})
+
+	////////////////////////////////////////////////
+	tree.Add(p, func(w *core.Separator) {})
+	ss.GUI.AddToolbarItem(p, egui.ToolbarItem{Label: "Reps Analysis",
+		Icon:    icons.Image,
+		Tooltip: "Run cluster plot analysis of Hidden layer representations from the test trial log.",
+		Active:  egui.ActiveAlways,
+		Func: func() {
+			ss.RepsAnalysis()
 		},
 	})
 
