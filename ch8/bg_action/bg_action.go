@@ -423,6 +423,9 @@ type Sim struct {
 	RunPlot     *eplot.Plot2D `view:"-" desc:"run plot"`
 
 	// ---- gui ----
+	ViewOn    bool              `desc:"whether to update the network view while running"`
+	TrainUpdt leabra.TimeScales `desc:"at what time scale to update the display during training? Change to AlphaCyc to make display updating go faster"`
+	TestUpdt  leabra.TimeScales `desc:"at what time scale to update the display during testing? Change to AlphaCyc to make display updating go faster"`
 	NetView   *netview.NetView `view:"-" desc:"net view"`
 	Win       *gi.Window       `view:"-" desc:"main gui window"`
 	ToolBar   *gi.ToolBar      `view:"-" desc:"toolbar"`
@@ -467,6 +470,9 @@ func (ss *Sim) New() {
 	ss.NTrialsPerEpoch = 100
 	ss.NRuns = 50
 	ss.NoiseStart = 1.0
+	ss.ViewOn = true
+	ss.TrainUpdt = leabra.Cycle
+	ss.TestUpdt = leabra.Cycle
 
 	ss.TrnEpcLog = &etable.Table{}
 	ss.TstEpcLog = &etable.Table{}
@@ -687,6 +693,20 @@ func (ss *Sim) NewRndSeed() {
 // Stop stops the simulation
 func (ss *Sim) Stop() {
 	ss.StopNow = true
+}
+
+// Stopped is called when a run method stops running -- updates the IsRunning flag and toolbar
+func (ss *Sim) Stopped() {
+	ss.IsRunning = false
+	if ss.Win != nil {
+		vp := ss.Win.WinViewport2D()
+		vp.BlockUpdates()
+		if ss.ToolBar != nil {
+			ss.ToolBar.UpdateActions()
+		}
+		vp.UnblockUpdates()
+		vp.SetNeedsFullRender()
+	}
 }
 
 // ApplyInputs applies the stimulus pattern for the current trial.
@@ -963,6 +983,10 @@ func (ss *Sim) Counters() string {
 // After minus phase (end of Q3), we determine action and deliver DA.
 func (ss *Sim) AlphaCyc() {
 	net := ss.Net
+	viewUpdt := ss.TrainUpdt
+	if ss.Testing {
+		viewUpdt = ss.TestUpdt
+	}
 
 	// Update prior weight changes at start
 	if !ss.Testing {
@@ -977,6 +1001,16 @@ func (ss *Sim) AlphaCyc() {
 		for cyc := 0; cyc < ss.Time.CycPerQtr; cyc++ {
 			net.Cycle(&ss.Time)
 			ss.Time.CycleInc()
+			if ss.ViewOn {
+				switch viewUpdt {
+				case leabra.Cycle:
+					ss.UpdateView(!ss.Testing)
+				case leabra.FastSpike:
+					if (cyc+1)%10 == 0 {
+						ss.UpdateView(!ss.Testing)
+					}
+				}
+			}
 		}
 
 		// After Q3 (minus phase complete), determine action and set DA for plus phase
@@ -998,6 +1032,16 @@ func (ss *Sim) AlphaCyc() {
 
 		net.QuarterFinal(&ss.Time)
 		ss.Time.QuarterInc()
+		if ss.ViewOn {
+			switch {
+			case viewUpdt <= leabra.Quarter:
+				ss.UpdateView(!ss.Testing)
+			case viewUpdt == leabra.Phase:
+				if qtr >= 2 {
+					ss.UpdateView(!ss.Testing)
+				}
+			}
+		}
 	}
 
 	// Learning (only during training)
@@ -1009,7 +1053,9 @@ func (ss *Sim) AlphaCyc() {
 		ss.ApplyDAModulation()
 	}
 
-	ss.UpdateView(!ss.Testing)
+	if ss.ViewOn && viewUpdt == leabra.AlphaCycle {
+		ss.UpdateView(!ss.Testing)
+	}
 }
 
 // ApplyDAModulation modulates the weight changes in Go and NoGo pathways
@@ -1072,15 +1118,17 @@ func (ss *Sim) TrainTrial() {
 
 // TrainEpoch runs one training epoch.
 func (ss *Sim) TrainEpoch() {
+	ss.StopNow = false
 	for trl := 0; trl < ss.NTrialsPerEpoch; trl++ {
 		ss.Trial = trl
 		ss.TrainTrial()
 		if ss.StopNow {
-			return
+			break
 		}
 	}
 	ss.LogTrnEpc(ss.TrnEpcLog)
 	ss.Epoch++
+	ss.Stopped()
 }
 
 // Train runs the full training procedure.
@@ -1095,8 +1143,7 @@ func (ss *Sim) Train() {
 			break
 		}
 	}
-	ss.IsRunning = false
-	ss.UpdateView(false)
+	ss.Stopped()
 }
 
 // TestTrial runs one test trial.
@@ -1112,14 +1159,16 @@ func (ss *Sim) TestTrial() {
 
 // TestEpoch runs one test epoch.
 func (ss *Sim) TestEpoch() {
+	ss.StopNow = false
 	for trl := 0; trl < ss.NTrialsPerEpoch; trl++ {
 		ss.Trial = trl
 		ss.TestTrial()
 		if ss.StopNow {
-			return
+			break
 		}
 	}
 	ss.LogTstEpc(ss.TstEpcLog)
+	ss.Stopped()
 }
 
 // Test runs the test phase.
@@ -1134,8 +1183,7 @@ func (ss *Sim) Test() {
 			break
 		}
 	}
-	ss.IsRunning = false
-	ss.UpdateView(false)
+	ss.Stopped()
 }
 
 // TrainAndTest runs the full train+test cycle.
@@ -1159,8 +1207,7 @@ func (ss *Sim) RunBatch() {
 			break
 		}
 	}
-	ss.IsRunning = false
-	ss.UpdateView(false)
+	ss.Stopped()
 }
 
 // SetDAStrength sets the D1 and D2 projection strengths.
@@ -1533,33 +1580,91 @@ func (ss *Sim) ConfigGui() *gi.Window {
 
 	split.SetSplits(.2, .8)
 
-	tbar.AddAction(gi.ActOpts{Label: "Init", Icon: "update", Tooltip: "Initialize network and environment"}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
+	tbar.AddAction(gi.ActOpts{Label: "Init", Icon: "update", Tooltip: "Initialize network and environment", UpdateFunc: func(act *gi.Action) {
+		act.SetActiveStateUpdt(!ss.IsRunning)
+	}}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
 		ss.Init()
 		vp.SetNeedsFullRender()
 	})
-	tbar.AddAction(gi.ActOpts{Label: "Train", Icon: "run", Tooltip: "Run training"}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
+	tbar.AddAction(gi.ActOpts{Label: "Train", Icon: "run", Tooltip: "Run full training", UpdateFunc: func(act *gi.Action) {
+		act.SetActiveStateUpdt(!ss.IsRunning)
+	}}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
 		if !ss.IsRunning {
+			ss.IsRunning = true
+			tbar.UpdateActions()
 			go ss.Train()
 		}
 	})
-	tbar.AddAction(gi.ActOpts{Label: "Test", Icon: "run", Tooltip: "Run testing"}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
+	tbar.AddAction(gi.ActOpts{Label: "Stop", Icon: "stop", Tooltip: "Stop running", UpdateFunc: func(act *gi.Action) {
+		act.SetActiveStateUpdt(ss.IsRunning)
+	}}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
+		ss.Stop()
+	})
+	tbar.AddAction(gi.ActOpts{Label: "Step Trial", Icon: "step-fwd", Tooltip: "Advances one training trial at a time, with per-cycle view updates.", UpdateFunc: func(act *gi.Action) {
+		act.SetActiveStateUpdt(!ss.IsRunning)
+	}}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
 		if !ss.IsRunning {
+			ss.IsRunning = true
+			ss.TrainTrial()
+			ss.IsRunning = false
+			vp.SetNeedsFullRender()
+		}
+	})
+	tbar.AddAction(gi.ActOpts{Label: "Step Epoch", Icon: "fast-fwd", Tooltip: "Advances one epoch of training.", UpdateFunc: func(act *gi.Action) {
+		act.SetActiveStateUpdt(!ss.IsRunning)
+	}}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
+		if !ss.IsRunning {
+			ss.IsRunning = true
+			tbar.UpdateActions()
+			go ss.TrainEpoch()
+		}
+	})
+
+	tbar.AddSeparator("test")
+
+	tbar.AddAction(gi.ActOpts{Label: "Test Trial", Icon: "step-fwd", Tooltip: "Runs one test trial with per-cycle view updates.", UpdateFunc: func(act *gi.Action) {
+		act.SetActiveStateUpdt(!ss.IsRunning)
+	}}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
+		if !ss.IsRunning {
+			ss.IsRunning = true
+			ss.TestTrial()
+			ss.IsRunning = false
+			vp.SetNeedsFullRender()
+		}
+	})
+	tbar.AddAction(gi.ActOpts{Label: "Test", Icon: "fast-fwd", Tooltip: "Run full test phase", UpdateFunc: func(act *gi.Action) {
+		act.SetActiveStateUpdt(!ss.IsRunning)
+	}}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
+		if !ss.IsRunning {
+			ss.IsRunning = true
+			tbar.UpdateActions()
 			go ss.Test()
 		}
 	})
-	tbar.AddAction(gi.ActOpts{Label: "Train+Test", Icon: "run", Tooltip: "Run full train and test"}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
+
+	tbar.AddSeparator("adv")
+
+	tbar.AddAction(gi.ActOpts{Label: "Train+Test", Icon: "run", Tooltip: "Run full train and test", UpdateFunc: func(act *gi.Action) {
+		act.SetActiveStateUpdt(!ss.IsRunning)
+	}}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
 		if !ss.IsRunning {
+			ss.IsRunning = true
+			tbar.UpdateActions()
 			go ss.TrainAndTest()
 		}
 	})
-	tbar.AddAction(gi.ActOpts{Label: "Batch", Icon: "run", Tooltip: "Run batch of networks"}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
+	tbar.AddAction(gi.ActOpts{Label: "Batch", Icon: "run", Tooltip: "Run batch of networks", UpdateFunc: func(act *gi.Action) {
+		act.SetActiveStateUpdt(!ss.IsRunning)
+	}}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
 		if !ss.IsRunning {
+			ss.IsRunning = true
+			tbar.UpdateActions()
 			go ss.RunBatch()
 		}
 	})
-	tbar.AddAction(gi.ActOpts{Label: "Stop", Icon: "stop", Tooltip: "Stop running"}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
-		ss.Stop()
-	})
+
+	tbar.AddSeparator("misc")
+
 	tbar.AddAction(gi.ActOpts{Label: "New Seed", Icon: "new", Tooltip: "New random seed"}, win.This(), func(recv, send ki.Ki, sig int64, data interface{}) {
 		ss.NewRndSeed()
 	})
