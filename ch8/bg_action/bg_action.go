@@ -49,7 +49,7 @@ func main() {
 		TheSim.CmdArgs() // simple abs-mode
 		return
 	}
-	gimain.Main(func() { // this starts gui -- requiresass'n into var
+	gimain.Main(func() { // this starts gui -- requires assignment into var
 		guirun()
 	})
 }
@@ -757,10 +757,9 @@ func (ss *Sim) ApplyInputs() {
 	// Apply PMC bias: bias the two candidate responses for this trial
 	// 8020: bias units 0,1,4,5 (R1,R2 channels -- pairs of PMC units per action)
 	// 6040: bias units 2,3,6,7 (R3,R4 channels)
-	// First clear all PMC bias weights
+	// Clear PMC bias from prior trials (resetting external input)
 	for i := 0; i < 8; i++ {
-		nrn := &pmc.Neurons[i]
-		_ = nrn
+		pmc.Neurons[i].Ext = 0
 	}
 
 	// Store trial info
@@ -892,7 +891,7 @@ func (ss *Sim) DeliverReward() {
 	} else if strings.Contains(ev.TrialName, "6040") {
 		switch ss.Action {
 		case 3: // R3: 60% reward
-			if rand.Intn(10) > 3 { // >3 means 60% chance (70%? -- proj has >3 = 70%)
+			if rand.Intn(10) > 3 { // values 4-9 = 60% chance, matching original proj IntZeroN(10)>3
 				rewarded = true
 			}
 		case 4: // R4: 40% reward
