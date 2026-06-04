@@ -3,7 +3,7 @@ module bg_action
 go 1.24.13
 
 require (
-	github.com/emer/emergent v1.4.31
+	github.com/emer/emergent v1.3.53
 	github.com/emer/etable v1.1.24
 	github.com/emer/leabra v1.2.10
 	github.com/goki/gi v1.3.25
@@ -14,7 +14,6 @@ require (
 	git.sr.ht/~sbinet/gg v0.3.1 // indirect
 	github.com/BurntSushi/freetype-go v0.0.0-20160129220410-b763ddbfe298 // indirect
 	github.com/BurntSushi/graphics-go v0.0.0-20160129215708-b43f31a4a966 // indirect
-	github.com/BurntSushi/toml v1.3.2 // indirect
 	github.com/BurntSushi/xgb v0.0.0-20210121224620-deaf085860bc // indirect
 	github.com/BurntSushi/xgbutil v0.0.0-20190907113008-ad855c713046 // indirect
 	github.com/Masterminds/vcs v1.13.3 // indirect
@@ -27,7 +26,6 @@ require (
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/c2h5oh/datasize v0.0.0-20220606134207-859f65c6625b // indirect
 	github.com/dlclark/regexp2 v1.10.0 // indirect
-	github.com/emer/empi v1.0.22 // indirect
 	github.com/fatih/camelcase v1.0.0 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
