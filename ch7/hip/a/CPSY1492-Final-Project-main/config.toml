@@ -1,0 +1,8 @@
+NRuns = 10
+NEpochs = 20
+NZero = 1
+TestInterval = 1
+StopMem = 1.0
+OverlapPct =  // change % overlap here manually // 
+PatternFile = " // add pathname here // "
+TestPatternFile = " // add pathname here // "

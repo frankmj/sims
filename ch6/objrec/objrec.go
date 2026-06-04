@@ -151,7 +151,7 @@ func (ss *Sim) ConfigEnv() {
 	trn.Name = etime.Train.String()
 	trn.Defaults()
 	trn.MinLED = 0
-	trn.MaxLED = 22 // exclude last 2 novel items by default
+	trn.MaxLED = 21 // exclude last 2 novel items by default
 	if ss.Config.Env.Env != nil {
 		params.ApplyMap(trn, ss.Config.Env.Env, ss.Config.Debug)
 	}
@@ -173,7 +173,7 @@ func (ss *Sim) ConfigEnv() {
 	tst.Name = etime.Test.String()
 	tst.Defaults()
 	tst.MinLED = 0
-	tst.MaxLED = 24      // all 25 patterns by default
+	tst.MaxLED = 21      // all 25 patterns by default
 	tst.Trial.Max = 500  // 0 // 1000 is too long!
 	if ss.Config.Env.Env != nil {
 		params.ApplyMap(tst, ss.Config.Env.Env, ss.Config.Debug)

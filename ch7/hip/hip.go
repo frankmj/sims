@@ -481,7 +481,7 @@ func (ss *Sim) ConfigLoops() {
 				trn.Validate()
 				// Apply DG lesion for AC training if the flag is set
 				if ss.DGLesion {
-					ss.Net.LayerByName("DG").LesionNeurons(0.5)
+					ss.Net.LayerByName("DG").LesionNeurons(0.95)
 				}
 			}
 		}
